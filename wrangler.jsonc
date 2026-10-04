@@ -1,0 +1,13 @@
+// One Worker: serves app/ and the rest-timer push API (worker/index.js).
+{
+  "name": "workout-logger",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-09-01",
+  "assets": { "directory": "./app" },
+  "durable_objects": {
+    "bindings": [{ "name": "REST_TIMER", "class_name": "RestTimer" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RestTimer"] }],
+  "observability": { "enabled": true }
+  // Secrets (wrangler secret put): APP_TOKEN, VAPID_PRIVATE_KEY
+}
