@@ -1,0 +1,329 @@
+// End-to-end offline test (run with: npm test).
+//
+// 1. Serves /app and a mock Apps Script endpoint (the real Code.gs running on fakes).
+// 2. Sets the app up online, then goes offline AND shuts both servers down.
+// 3. Logs a full Day A session, killing the browser halfway through and again at the end.
+// 4. Brings the network back with the first POST "losing" its response (server
+//    commits but returns 500) to force a retry.
+// 5. Asserts every set landed in the Log tab exactly once and the session row is complete.
+import { chromium } from 'playwright';
+import http from 'node:http';
+import { readFile, rm } from 'node:fs/promises';
+import { join, extname, normalize } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import assert from 'node:assert/strict';
+import { createBackend } from './fake-gas.mjs';
+
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+const APP_DIR = join(ROOT, 'app');
+const PROFILE = join(ROOT, '.test-profile');
+const APP_PORT = 8787;
+const API_PORT = 8788;
+const APP_URL = `http://127.0.0.1:${APP_PORT}/`;
+const API_URL = `http://127.0.0.1:${API_PORT}/exec`;
+const HEADLESS = process.env.HEADED ? false : true;
+
+const log = (...a) => console.log('•', ...a);
+
+// ---------- servers ----------
+const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml' };
+
+function startServer(port, handler) {
+  return new Promise((resolve) => {
+    const srv = http.createServer(handler);
+    srv.listen(port, '127.0.0.1', () => resolve(srv));
+  });
+}
+function stopServer(srv) {
+  return new Promise((resolve) => { srv.closeAllConnections(); srv.close(() => resolve()); });
+}
+
+let swBuild = null; // when set, serve sw.js as if a new version was deployed
+const appHandler = async (req, res) => {
+  let p = decodeURIComponent(new URL(req.url, APP_URL).pathname);
+  if (p.endsWith('/')) p += 'index.html';
+  const file = normalize(join(APP_DIR, p));
+  if (!file.startsWith(APP_DIR)) { res.writeHead(403); return res.end(); }
+  try {
+    let body = await readFile(file);
+    if (swBuild && file.endsWith('sw.js')) body = body.toString().replace("const BUILD = 'dev'", `const BUILD = '${swBuild}'`);
+    res.writeHead(200, { 'Content-Type': MIME[extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
+    res.end(body);
+  } catch {
+    res.writeHead(404); res.end('not found');
+  }
+};
+
+const backend = createBackend();
+const TOKEN = backend.ctx.setup();
+const traffic = { posts: 0, options: 0, contentTypes: [], failNextPostAfterCommit: 0 };
+
+const apiHandler = (req, res) => {
+  const cors = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
+  const u = new URL(req.url, API_URL);
+  if (req.method === 'OPTIONS') { traffic.options++; res.writeHead(405, cors); return res.end(); }
+  if (req.method === 'GET') {
+    const out = backend.ctx.doGet({ parameter: Object.fromEntries(u.searchParams) });
+    res.writeHead(200, cors); return res.end(out.getContent());
+  }
+  let body = '';
+  req.on('data', (c) => { body += c; });
+  req.on('end', () => {
+    traffic.posts++;
+    traffic.contentTypes.push(req.headers['content-type']);
+    const out = backend.ctx.doPost({ postData: { contents: body, type: req.headers['content-type'] } });
+    if (traffic.failNextPostAfterCommit > 0) {
+      traffic.failNextPostAfterCommit--;
+      log('mock: committed the batch but answering 500 (simulated lost response)');
+      res.writeHead(500, cors); return res.end('{"ok":false}');
+    }
+    res.writeHead(200, cors); res.end(out.getContent());
+  });
+};
+
+// ---------- browser helpers ----------
+async function launch() {
+  const ctx = await chromium.launchPersistentContext(PROFILE, {
+    headless: HEADLESS,
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+    serviceWorkers: 'allow',
+  });
+  ctx.on('weberror', (e) => console.error('PAGE ERROR', e.error()));
+  return ctx;
+}
+async function openApp(ctx) {
+  const page = ctx.pages()[0] || await ctx.newPage();
+  page.on('dialog', (d) => d.accept());
+  page.on('pageerror', (e) => console.error('PAGE ERROR', e));
+  await page.goto(APP_URL);
+  return page;
+}
+const syncText = (page) => page.locator('#sync-indicator').innerText();
+const outboxCount = (page) => page.evaluate(() => new Promise((res) => {
+  const r = indexedDB.open('workout-logger');
+  r.onsuccess = () => { const q = r.result.transaction('outbox').objectStore('outbox').count(); q.onsuccess = () => { res(q.result); r.result.close(); }; };
+}));
+const localSetIds = (page) => page.evaluate(() => new Promise((res) => {
+  const r = indexedDB.open('workout-logger');
+  r.onsuccess = () => { const q = r.result.transaction('sets').objectStore('sets').getAllKeys(); q.onsuccess = () => { res(q.result); r.result.close(); }; };
+}));
+
+async function logSet(page, ex, set) {
+  const done = page.locator(`section[data-ex="${ex}"] .set.done`);
+  const before = await done.count();
+  await page.click(`[data-act="log"][data-ex="${ex}"][data-set="${set}"]`);
+  await assertEventually(async () => (await done.count()) === before + 1, `set ${ex}/${set} saved`);
+}
+async function assertEventually(fn, what, timeout = 15000) {
+  const end = Date.now() + timeout;
+  for (;;) {
+    if (await fn()) return;
+    if (Date.now() > end) throw new Error(`Timed out waiting for: ${what}`);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+// ---------- the test ----------
+async function main() {
+  await rm(PROFILE, { recursive: true, force: true });
+  let appSrv = await startServer(APP_PORT, appHandler);
+  let apiSrv = await startServer(API_PORT, apiHandler);
+
+  // Backend sanity checks against the real Code.gs
+  const planTab = backend.sheet('Plan').objects();
+  assert.equal(planTab.length, 18, 'Plan seeded with 18 rows');
+  assert.equal(backend.name(), 'Joseph Workout Log');
+  assert.equal(JSON.parse(backend.ctx.doGet({ parameter: { action: 'plan', token: 'nope' } }).getContent()).error, 'unauthorized', 'bad token rejected');
+  assert.equal(JSON.parse(backend.ctx.doPost({ postData: { contents: JSON.stringify({ token: 'x'.repeat(64), sets: [] }) } }).getContent()).error, 'unauthorized', 'bad POST token rejected');
+  log('Code.gs: setup() seeded Plan, bad tokens rejected');
+
+  // --- 1. First run, online: setup screen ---
+  let ctx = await launch();
+  let page = await openApp(ctx);
+  await page.fill('#cfg-url', API_URL);
+  await page.fill('#cfg-token', TOKEN);
+  await page.click('[data-act="save-config"]');
+  await page.waitForSelector('[data-act="start"][data-day="A"]');
+  await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
+  await page.waitForFunction(() => window.__wl.state.plan && window.__wl.state.history);
+  const cacheKeys = await page.evaluate(() => caches.keys());
+  assert.ok(cacheKeys.some((k) => k.startsWith('wl-shell-')), 'app shell precached');
+  await assertEventually(async () => (await syncText(page)).includes('synced'), 'synced indicator');
+  log('setup done, SW controlling, plan cached, indicator:', await syncText(page));
+
+  // --- 2. Go offline for real: emulate offline AND kill both servers ---
+  await ctx.setOffline(true);
+  await stopServer(appSrv);
+  await stopServer(apiSrv);
+  await assertEventually(async () => (await syncText(page)) === 'offline', 'offline indicator');
+  log('offline; indicator:', await syncText(page));
+
+  // --- 3. Log Day A ---
+  await page.click('[data-act="start"][data-day="A"]');
+  await page.waitForSelector('section[data-ex="0"]');
+  const exNames = await page.locator('section.ex h3').allInnerTexts();
+  assert.deepEqual(exNames, ['Barbell back squat', 'Bench press', 'Seated cable row', 'DB walking lunges', 'DB lateral raises', 'Plank']);
+  assert.equal(await page.inputValue('input[data-field="w"][data-ex="0"][data-set="1"]'), '105', 'prefilled from target');
+
+  // Squat set 1: bump weight +5 → 110 and verify set 2 carries it.
+  await page.click('[data-act="step"][data-ex="0"][data-set="1"][data-field="w"][data-delta="5"]');
+  assert.equal(await page.inputValue('input[data-field="w"][data-ex="0"][data-set="1"]'), '110');
+  await logSet(page, 0, 1);
+  assert.ok(await page.isVisible('#rest-bar'), 'rest timer started');
+  assert.equal(await page.inputValue('input[data-field="w"][data-ex="0"][data-set="2"]'), '110', 'weight carried to next set');
+  await logSet(page, 0, 2);
+  await logSet(page, 0, 3);
+
+  // Bench set 2 with RIR + pain flag.
+  await logSet(page, 1, 1);
+  await page.click('[data-act="more"][data-ex="1"][data-set="2"]');
+  await page.click('[data-act="rir"][data-ex="1"][data-set="2"][data-v="2"]');
+  await page.click('[data-act="pain"][data-ex="1"][data-set="2"][data-v="muscle"]');
+  await page.fill('input[data-field="note"][data-ex="1"][data-set="2"]', 'grip slipped');
+  await logSet(page, 1, 2);
+  await logSet(page, 1, 3);
+  await page.screenshot({ path: join(ROOT, 'test-results', 'workout.png') }).catch(() => {});
+  for (const s of [1, 2, 3]) await logSet(page, 2, s);
+  assert.equal(await outboxCount(page), 9, '9 sets queued');
+
+  // --- Kill the app mid-session and reopen (servers still down → served by SW) ---
+  await ctx.close();
+  ctx = await launch();
+  await ctx.setOffline(true);
+  page = await openApp(ctx);
+  await page.waitForSelector('section[data-ex="0"]');
+  assert.equal(await page.locator('.set.done').count(), 9, 'in-progress session survived the kill');
+  log('killed & reopened offline: session resumed with 9 sets');
+
+  for (const s of [1, 2, 3]) await logSet(page, 3, s);
+  // Lateral raises: sharp pain on set 3 → red banner.
+  await logSet(page, 4, 1);
+  await logSet(page, 4, 2);
+  await page.click('[data-act="more"][data-ex="4"][data-set="3"]');
+  await page.click('[data-act="pain"][data-ex="4"][data-set="3"][data-v="sharp"]');
+  assert.ok(await page.isVisible('section[data-ex="4"] .banner-sharp'), 'sharp → stop banner');
+  await logSet(page, 4, 3);
+  for (const s of [1, 2, 3]) await logSet(page, 5, s);
+  assert.equal(await page.inputValue('input[data-field="r"][data-ex="5"][data-set="4"]').catch(() => 'none'), 'none');
+
+  // Finish
+  await page.click('[data-act="finish"]');
+  await page.click('[data-energy="4"]');
+  await page.fill('#fin-bw', '181.5');
+  await page.fill('#fin-notes', 'Felt strong');
+  await page.click('#fin-save');
+  await page.waitForSelector('text=Day A done');
+  await page.screenshot({ path: join(ROOT, 'test-results', 'summary.png') }).catch(() => {});
+  assert.match(await page.locator('main').innerText(), /Sets logged\s*18/);
+  assert.equal(await outboxCount(page), 19, '18 sets + 1 session pending');
+  assert.equal(await syncText(page), 'offline · 19');
+  log('session finished offline; indicator:', await syncText(page));
+
+  // --- Kill again while everything is still unsynced ---
+  await ctx.close();
+  ctx = await launch();
+  await ctx.setOffline(true);
+  page = await openApp(ctx);
+  await page.waitForSelector('[data-act="start"][data-day="A"]');
+  await page.screenshot({ path: join(ROOT, 'test-results', 'home.png') }).catch(() => {});
+  assert.equal(await outboxCount(page), 19, 'outbox survived the kill');
+  assert.equal(backend.sheet('Log').objects().length, 0, 'nothing reached the sheet while offline');
+  log('killed & reopened again: 19 items still queued');
+
+  // --- 4. Back online. First POST commits but its response is "lost" (500). ---
+  appSrv = await startServer(APP_PORT, appHandler);
+  apiSrv = await startServer(API_PORT, apiHandler);
+  traffic.failNextPostAfterCommit = 1;
+  await ctx.setOffline(false);
+  await assertEventually(async () => (await syncText(page)) === '✓ synced', '✓ synced after reconnect', 30000);
+  log('back online; indicator:', await syncText(page), `(POSTs: ${traffic.posts})`);
+
+  // --- 5. Assertions on the sheet ---
+  const rows = backend.sheet('Log').objects();
+  const ids = rows.map((r) => r.set_id);
+  const local = await localSetIds(page);
+  assert.equal(rows.length, 18, 'exactly 18 Log rows');
+  assert.equal(new Set(ids).size, 18, 'no duplicate set_ids');
+  assert.deepEqual([...ids].sort(), [...local].sort(), 'sheet matches device');
+  assert.ok(traffic.posts >= 2, 'a retry happened after the lost response');
+  assert.equal(traffic.options, 0, 'no CORS preflight');
+  assert.ok(traffic.contentTypes.every((t) => t.startsWith('text/plain')), 'POSTs are text/plain');
+
+  const squat1 = rows.find((r) => r.exercise === 'Barbell back squat' && r.set_number === 1);
+  assert.equal(squat1.weight_lb, 110);
+  assert.equal(squat1.reps_or_amount, 8);
+  assert.equal(squat1.unit, 'reps');
+  assert.equal(squat1.day, 'A');
+  assert.match(squat1.logged_at, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d$/);
+  const bench2 = rows.find((r) => r.exercise === 'Bench press' && r.set_number === 2);
+  assert.equal(bench2.rir, 2);
+  assert.equal(bench2.pain_flag, 'muscle');
+  assert.equal(bench2.set_note, 'grip slipped');
+  assert.equal(rows.find((r) => r.exercise === 'DB lateral raises' && r.set_number === 3).pain_flag, 'sharp');
+  const plank = rows.find((r) => r.exercise === 'Plank');
+  assert.equal(plank.unit, 'sec');
+  assert.equal(plank.reps_or_amount, 30);
+  assert.equal(rows.find((r) => r.exercise === 'DB walking lunges').weight_lb, 5);
+
+  const sessions = backend.sheet('Sessions').objects();
+  assert.equal(sessions.length, 1, 'one Sessions row (upserted, not duplicated)');
+  assert.equal(sessions[0].energy, 4);
+  assert.equal(sessions[0].bodyweight_lb, 181.5);
+  assert.equal(sessions[0].session_notes, 'Felt strong');
+  assert.ok(sessions[0].end_time, 'end_time set');
+  assert.equal(typeof sessions[0].duration_min, 'number');
+  log('sheet: 18 Log rows, 18 unique set_ids, 1 complete Sessions row');
+
+  // --- 6. Idempotency: force sync + replaying the same batch adds nothing ---
+  await page.click('[data-nav="settings"]');
+  await page.click('[data-act="force-sync"]');
+  const replay = await page.evaluate(async ({ url, token }) => {
+    const sets = await new Promise((res) => {
+      const r = indexedDB.open('workout-logger');
+      r.onsuccess = () => { const q = r.result.transaction('sets').objectStore('sets').getAll(); q.onsuccess = () => res(q.result); };
+    });
+    const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ token, sets }) });
+    return resp.json();
+  }, { url: API_URL, token: TOKEN });
+  assert.equal(replay.sets_inserted, 0);
+  assert.equal(replay.sets_skipped, 18);
+  assert.equal(backend.sheet('Log').objects().length, 18, 'still 18 rows after replay');
+  log('replayed all 18 sets: 0 inserted, 18 skipped');
+
+  // --- 7. "Last time" + "last done" + history chart ---
+  await page.click('[data-nav="home"]');
+  assert.match(await page.locator('[data-day="A"] .last').innerText(), /today/);
+  await page.click('[data-act="start"][data-day="A"]');
+  await page.waitForSelector('section[data-ex="0"]');
+  assert.match(await page.locator('section[data-ex="0"] .ex-last').innerText(), /110×8, 110×8, 110×8/);
+  assert.equal(await page.inputValue('input[data-field="w"][data-ex="0"][data-set="1"]'), '110', 'prefilled from last time (more than target)');
+  await page.click('[data-act="discard"]');
+  await page.waitForSelector('[data-act="start"][data-day="A"]');
+  await page.click('[data-nav="history"]');
+  await page.waitForSelector('svg.chart');
+  assert.equal(await page.locator('details.hist-item').count(), 1);
+  await page.screenshot({ path: join(ROOT, 'test-results', 'history.png') }).catch(() => {});
+  log('last-time prefill, last-done date and history chart OK');
+
+  // --- 8. Deploying a new version shows the update toast; tapping it reloads onto the new SW ---
+  swBuild = 'v2test';
+  await page.click('[data-nav="settings"]');
+  await page.click('[data-act="check-update"]');
+  await page.waitForSelector('#toast:has-text("Update available")');
+  await Promise.all([page.waitForEvent('load'), page.click('#toast')]);
+  await assertEventually(async () => (await page.evaluate(() => caches.keys())).join() === 'wl-shell-1.0.0-v2test', 'new cache active, old one deleted');
+  log('update toast shown; reload activated the new version');
+
+  await ctx.close();
+  await stopServer(appSrv);
+  await stopServer(apiSrv);
+  await rm(PROFILE, { recursive: true, force: true });
+  console.log('\nPASS — offline session logged, app killed twice, every set synced exactly once.');
+}
+
+main().catch(async (e) => {
+  console.error('\nFAIL:', e);
+  process.exit(1);
+});

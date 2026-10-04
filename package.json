@@ -1,0 +1,13 @@
+{
+  "name": "workout-logger",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "serve": "npx http-server app -p 8080 -c-1",
+    "icons": "node tools/make-icons.mjs",
+    "test": "node tests/offline.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.56.1"
+  }
+}

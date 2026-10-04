@@ -1,0 +1,27 @@
+// Renders the barbell icon SVG to PNGs with Playwright's Chromium.
+// Usage: node tools/make-icons.mjs   (writes app/icons/*.png)
+import { chromium } from 'playwright';
+import { writeFileSync } from 'node:fs';
+
+const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#0e1116"/>
+  <circle cx="256" cy="256" r="200" fill="#16202c"/>
+  <rect x="70" y="244" width="372" height="24" rx="8" fill="#c9d3df"/>
+  <rect x="112" y="166" width="38" height="180" rx="10" fill="#4fb3ff"/>
+  <rect x="362" y="166" width="38" height="180" rx="10" fill="#4fb3ff"/>
+  <rect x="150" y="196" width="26" height="120" rx="8" fill="#2f86c9"/>
+  <rect x="336" y="196" width="26" height="120" rx="8" fill="#2f86c9"/>
+  <rect x="94" y="228" width="18" height="56" rx="5" fill="#c9d3df"/>
+  <rect x="400" y="228" width="18" height="56" rx="5" fill="#c9d3df"/>
+</svg>`;
+writeFileSync(new URL('../app/icons/icon.svg', import.meta.url), svg);
+
+const browser = await chromium.launch();
+for (const [name, size] of [['icon-192.png', 192], ['icon-512.png', 512], ['apple-touch-icon.png', 180]]) {
+  const page = await browser.newPage({ viewport: { width: size, height: size } });
+  await page.setContent(`<html><body style="margin:0">${svg.replace('<svg ', `<svg width="${size}" height="${size}" `)}</body></html>`);
+  writeFileSync(new URL(`../app/icons/${name}`, import.meta.url), await page.screenshot({ type: 'png' }));
+  await page.close();
+}
+await browser.close();
+console.log('icons written');
