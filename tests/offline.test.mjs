@@ -84,6 +84,8 @@ const apiHandler = (req, res) => {
 // ---------- browser helpers ----------
 async function launch() {
   const ctx = await chromium.launchPersistentContext(PROFILE, {
+    // PW_CHANNEL=chrome uses the installed Google Chrome instead of Playwright's Chromium.
+    channel: process.env.PW_CHANNEL || undefined,
     headless: HEADLESS,
     viewport: { width: 390, height: 844 },
     isMobile: true,
@@ -91,6 +93,7 @@ async function launch() {
     serviceWorkers: 'allow',
   });
   ctx.on('weberror', (e) => console.error('PAGE ERROR', e.error()));
+  await ctx.grantPermissions(['notifications'], { origin: `http://127.0.0.1:${APP_PORT}` });
   return ctx;
 }
 async function openApp(ctx) {
@@ -152,6 +155,21 @@ async function main() {
   assert.ok(cacheKeys.some((k) => k.startsWith('wl-shell-')), 'app shell precached');
   await assertEventually(async () => (await syncText(page)).includes('synced'), 'synced indicator');
   log('setup done, SW controlling, plan cached, indicator:', await syncText(page));
+  // A push from the Worker (no payload) becomes the "Rest over" notification.
+  const cdp = await ctx.newCDPSession(page);
+  const swReg = new Promise((res) => cdp.on('ServiceWorker.workerRegistrationUpdated', (e) => {
+    const r = e.registrations.find((x) => !x.isDeleted);
+    if (r) res(r);
+  }));
+  await cdp.send('ServiceWorker.enable');
+  await cdp.send('ServiceWorker.deliverPushMessage', { origin: `http://127.0.0.1:${APP_PORT}`, registrationId: (await swReg).registrationId, data: '' });
+  await new Promise((r) => setTimeout(r, 1000)); // headless Chrome misses the notification if getNotifications() is polled straight away
+  const shown = () => page.evaluate(async () => (await (await navigator.serviceWorker.ready).getNotifications()).map((n) => ({ title: n.title, body: n.body, tag: n.tag })));
+  await assertEventually(async () => (await shown()).length === 1, 'push shows a notification');
+  assert.deepEqual(await shown(), [{ title: 'Rest over', body: 'Time for your next set', tag: 'rest' }]);
+  await page.evaluate(async () => (await (await navigator.serviceWorker.ready).getNotifications()).forEach((n) => n.close()));
+  await cdp.detach();
+  log('push → "Rest over" notification');
 
   // --- 2. Go offline for real: emulate offline AND kill both servers ---
   await ctx.setOffline(true);

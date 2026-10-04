@@ -2,7 +2,7 @@
  * waits for the page to say SKIP_WAITING before taking over (so an update
  * never swaps code out from under an in-progress set).
  *
- * VERSION must change on every deploy. The GitHub Pages workflow stamps BUILD
+ * VERSION must change on every deploy. The deploy workflow stamps BUILD
  * with the commit SHA automatically; bump VERSION by hand for local testing.
  */
 const VERSION = '1.0.0';
@@ -11,7 +11,6 @@ const CACHE = `wl-shell-${VERSION}-${BUILD}`;
 
 const SHELL = [
   './',
-  './index.html',
   './app.js',
   './styles.css',
   './manifest.json',
@@ -44,12 +43,12 @@ self.addEventListener('message', (event) => {
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   const url = new URL(req.url);
-  // Only the app's own static files. API calls (Apps Script) go straight to the network.
-  if (req.method !== 'GET' || url.origin !== self.location.origin) return;
+  // Only the app's own static files. API calls (Apps Script, /api/*) go straight to the network.
+  if (req.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
 
   if (req.mode === 'navigate') {
     event.respondWith(
-      caches.match('./index.html', { cacheName: CACHE }).then((hit) => hit || fetch(req)),
+      caches.match('./', { cacheName: CACHE }).then((hit) => hit || fetch(req)),
     );
     return;
   }
@@ -57,4 +56,23 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     caches.match(req, { cacheName: CACHE, ignoreSearch: true }).then((hit) => hit || fetch(req)),
   );
+});
+
+// Rest alert from the Worker. iOS requires every push to show a notification.
+self.addEventListener('push', (event) => {
+  event.waitUntil(self.registration.showNotification('Rest over', {
+    body: 'Time for your next set',
+    tag: 'rest',        // each alert replaces the previous one
+    renotify: true,     // ...and still buzzes
+    icon: 'icons/icon-192.png',
+  }));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    if (wins.length) return wins[0].focus();
+    return self.clients.openWindow('./');
+  })());
 });
