@@ -522,7 +522,9 @@
   let audioCtx = null;
   function unlockAudio() {
     try {
-      if (navigator.audioSession) navigator.audioSession.type = 'playback'; // iOS 17+: play even on silent
+      if (audioCtx && audioCtx.state === 'running') return;
+      // 'ambient' mixes with Music/Audible; 'playback' would interrupt them.
+      if (navigator.audioSession) navigator.audioSession.type = 'ambient';
       audioCtx ||= new (window.AudioContext || window.webkitAudioContext)();
       if (audioCtx.state === 'suspended') audioCtx.resume();
       const b = audioCtx.createBuffer(1, 1, 22050);
