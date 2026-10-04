@@ -11,7 +11,7 @@ app/            index.html, app.js, styles.css, sw.js, manifest.json, icons/
 apps-script/    Code.gs, appsscript.json
 tests/          offline.test.mjs (Playwright), fake-gas.mjs (Apps Script fakes)
 tools/          make-icons.mjs (renders the barbell icon PNGs)
-.github/        workflows/pages.yml (test, then deploy app/ to Pages)
+deploy/         pages.yml (Actions workflow: test, then deploy app/ to Pages; move into .github/workflows/)
 ```
 
 ---
@@ -62,11 +62,21 @@ clasp deploy -d v1    # then use the /exec URL from `clasp deployments`
 
 ## 2. Deploy the app (GitHub Pages)
 
-The workflow `.github/workflows/pages.yml` runs the Playwright test on every push. It then publishes `app/` to Pages from the repo's **default branch**.
+The workflow file is at `deploy/pages.yml`. It runs the Playwright test on every push, then publishes `app/` to Pages from the repo's **default branch**. It isn't in `.github/workflows/` because the tool that set up this repo wasn't allowed to write workflow files, so you need to move it once.
 
-One-time switch: on GitHub, go to **Settings → Pages → Build and deployment → Source** and choose **GitHub Actions**. Then push to the default branch, or run the workflow by hand from **Actions → Test & deploy to GitHub Pages → Run workflow**.
+**Option A (recommended): GitHub Actions**
+1. Move the workflow into place. Either:
+   - Locally: `git mv deploy/pages.yml .github/workflows/pages.yml && git commit -m "Enable Pages workflow" && git push`, or
+   - On github.com: **Add file → Create new file**, name it `.github/workflows/pages.yml` and paste in the contents of `deploy/pages.yml`.
+2. Go to **Settings → Pages → Build and deployment → Source** and choose **GitHub Actions**.
+3. Push to the default branch, or go to **Actions → Test & deploy to GitHub Pages → Run workflow**.
 
-The app will be at **https://cedral.github.io/WorkoutLogger/**. Pages serves it over HTTPS, which the service worker requires.
+The app is served at **https://cedral.github.io/WorkoutLogger/**. Pages serves it over HTTPS, which the service worker requires.
+
+**Option B: no workflow**
+1. Go to **Settings → Pages → Source: Deploy from a branch**, then pick the default branch and **/ (root)**.
+2. The app is served at **https://cedral.github.io/WorkoutLogger/app/**.
+3. With this option nothing stamps the version, so bump `VERSION` in `app/sw.js` by hand on every change.
 
 ## 3. Install on the iPhone
 
@@ -81,7 +91,7 @@ The app will be at **https://cedral.github.io/WorkoutLogger/**. Pages serves it 
 
 ## 4. How updates roll out
 
-- Every deploy stamps `app/sw.js` with the commit SHA (`const BUILD = '…'`). The cache name becomes `wl-shell-<VERSION>-<sha>`, so the browser treats it as a new service worker.
+- Every deploy through the workflow stamps `app/sw.js` with the commit SHA (`const BUILD = '…'`). The cache name becomes `wl-shell-<VERSION>-<sha>`, so the browser treats it as a new service worker. With Option B, bump `VERSION` by hand instead.
 - The phone checks for a new version when the app opens and each time it comes back to the foreground. It downloads the new files in the background and shows **"Update available — tap to reload"**.
 - The new version only takes over when you tap that toast, so code never changes in the middle of a set. After the reload, the old cache is deleted.
 - Your data is untouched by updates. It lives in IndexedDB, not in the cache.
