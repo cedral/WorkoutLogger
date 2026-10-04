@@ -508,6 +508,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   }));
   await cdp.send('ServiceWorker.enable');
   await cdp.send('ServiceWorker.deliverPushMessage', { origin: `http://127.0.0.1:${APP_PORT}`, registrationId: (await swReg).registrationId, data: '' });
+  await new Promise((r) => setTimeout(r, 1000)); // headless Chrome misses the notification if getNotifications() is polled straight away
   const shown = () => page.evaluate(async () => (await (await navigator.serviceWorker.ready).getNotifications()).map((n) => ({ title: n.title, body: n.body, tag: n.tag })));
   await assertEventually(async () => (await shown()).length === 1, 'push shows a notification');
   assert.deepEqual(await shown(), [{ title: 'Rest over', body: 'Time for your next set', tag: 'rest' }]);
