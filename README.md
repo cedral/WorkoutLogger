@@ -2,16 +2,19 @@
 
 An offline-first workout logger for iPhone. It's a Progressive Web App (PWA) that you add to the home screen, and it syncs to a Google Sheet named **Joseph Workout Log**. An AI coach (Claude) reads that sheet through the Google Drive connector.
 
-- **Frontend:** `/app`, a static PWA in vanilla HTML/CSS/JS with no framework and no build step. It's hosted on GitHub Pages.
+- **Frontend:** `/app`, a static PWA in vanilla HTML/CSS/JS with no framework and no build step. It's hosted on a Cloudflare Worker, which also sends rest-timer alerts.
 - **Backend:** `/apps-script`, a Google Apps Script web app bound to the sheet.
+- **Worker:** `/worker`, which serves `app/` and pushes a notification when a rest ends.
 - **Tests:** `/tests`, an end-to-end offline test in Playwright. It runs the real `Code.gs` against an in-memory fake of Google Sheets.
 
 ```
 app/            index.html, app.js, styles.css, sw.js, manifest.json, icons/
 apps-script/    Code.gs, appsscript.json
+worker/         index.js (router + RestTimer Durable Object), webpush.js (VAPID)
+wrangler.jsonc  Worker config
 tests/          offline.test.mjs (Playwright), fake-gas.mjs (Apps Script fakes)
-tools/          make-icons.mjs (renders the barbell icon PNGs)
-deploy/         pages.yml (Actions workflow: test, then deploy app/ to Pages; move into .github/workflows/)
+tools/          make-icons.mjs (renders the barbell icon PNGs), make-vapid.mjs
+.github/workflows/deploy.yml  (test, then wrangler deploy)
 ```
 
 ---
@@ -60,38 +63,37 @@ clasp deploy -d v1    # then use the /exec URL from `clasp deployments`
 ```
 </details>
 
-## 2. Deploy the app (GitHub Pages)
+## 2. Deploy the app (Cloudflare Worker)
 
-The workflow file is at `deploy/pages.yml`. It runs the Playwright test on every push, then publishes `app/` to Pages from the repo's **default branch**. It isn't in `.github/workflows/` because the tool that set up this repo wasn't allowed to write workflow files, so you need to move it once.
+One Worker serves `app/` and the rest-alert API. It's on the free plan.
 
-**Option A (recommended): GitHub Actions**
-1. Move the workflow into place. Either:
-   - Locally: `git mv deploy/pages.yml .github/workflows/pages.yml && git commit -m "Enable Pages workflow" && git push`, or
-   - On github.com: **Add file → Create new file**, name it `.github/workflows/pages.yml` and paste in the contents of `deploy/pages.yml`.
-2. Go to **Settings → Pages → Build and deployment → Source** and choose **GitHub Actions**.
-3. Push to the default branch, or go to **Actions → Test & deploy to GitHub Pages → Run workflow**.
+**One-time setup**
+1. `npx wrangler login`
+2. `npx wrangler deploy`. Note the URL it prints (`https://workout-logger.<you>.workers.dev`).
+3. `node tools/make-vapid.mjs | npx wrangler secret put VAPID_PRIVATE_KEY` (the key that signs pushes).
+4. `npx wrangler secret put APP_TOKEN`, then paste the **same token** as Apps Script.
+5. For auto-deploys, create a Cloudflare API token (dashboard → My Profile → API Tokens → template **Edit Cloudflare Workers**), then:
+   `gh secret set CLOUDFLARE_API_TOKEN` and `gh secret set CLOUDFLARE_ACCOUNT_ID` (the ID is shown by `npx wrangler whoami`).
 
-The app is served at **https://cedral.github.io/WorkoutLogger/**. Pages serves it over HTTPS, which the service worker requires.
+After that, every push runs the tests, and pushes to the default branch run `wrangler deploy` (`.github/workflows/deploy.yml`).
 
-**Option B: no workflow**
-1. Go to **Settings → Pages → Source: Deploy from a branch**, then pick the default branch and **/ (root)**.
-2. The app is served at **https://cedral.github.io/WorkoutLogger/app/**.
-3. With this option nothing stamps the version, so bump `VERSION` in `app/sw.js` by hand on every change.
+Don't regenerate `VAPID_PRIVATE_KEY` casually. If you do, turn rest alerts off and on again on the phone (Settings).
 
 ## 3. Install on the iPhone
 
-1. Open the Pages URL in **Safari**. It has to be Safari, because other iOS browsers can't install PWAs.
+1. Open the workers.dev URL in **Safari**. It has to be Safari, because other iOS browsers can't install PWAs.
 2. Tap **Share** (□↑), then **Add to Home Screen**, then **Add**.
 3. Launch it from the home screen icon. It opens full-screen with no Safari bars.
 4. On the setup screen, paste the **Web app URL** and the **token**, then tap **Save & connect**.
    - Tip: AirDrop or Notes them to yourself, then copy and paste.
 5. Open the app once while online. That caches the app shell and downloads the Plan. After that it works with no signal at all.
+6. **Settings → Rest alerts → Enable rest alerts**, then Allow. Tap **Send a test alert in 5 s** and lock the phone. Your watch should buzz.
 
 > The home-screen app has its own storage, separate from Safari's. Always use the icon, not a Safari tab.
 
 ## 4. How updates roll out
 
-- Every deploy through the workflow stamps `app/sw.js` with the commit SHA (`const BUILD = '…'`). The cache name becomes `wl-shell-<VERSION>-<sha>`, so the browser treats it as a new service worker. With Option B, bump `VERSION` by hand instead.
+- Every deploy stamps `app/sw.js` with the commit SHA (`const BUILD = '…'`). The cache name becomes `wl-shell-<VERSION>-<sha>`, so the browser treats it as a new service worker.
 - The phone checks for a new version when the app opens and each time it comes back to the foreground. It downloads the new files in the background and shows **"Update available — tap to reload"**.
 - The new version only takes over when you tap that toast, so code never changes in the middle of a set. After the reload, the old cache is deleted.
 - Your data is untouched by updates. It lives in IndexedDB, not in the cache.
@@ -116,7 +118,7 @@ The app is served at **https://cedral.github.io/WorkoutLogger/**. Pages serves i
 - **Settings → Export all data (JSON):** a full local backup through the iOS share sheet. It includes any unsynced items.
 - The app calls `navigator.storage.persist()` to make it less likely that iOS evicts the data.
 
-**Rest timer:** it starts automatically after each ✓. It's based on a stored end time, so it stays correct after the phone is locked or the app is killed. When it ends you get a short beep and a green screen flash. iOS PWAs can't vibrate. On iOS 17+ the beep plays even with the silent switch on.
+**Rest timer:** it starts automatically after each ✓. It's based on a stored end time, so it stays correct after the phone is locked or the app is killed. When it ends you get a short beep and a green screen flash. The beep mixes with Music/Audible instead of pausing them, and it's silent when the ring/silent switch is on. With rest alerts on, the Worker also sends a notification at the end of each rest, so a locked phone's watch buzzes. That needs a connection when the rest starts. Offline, you only get the in-app beep and flash.
 
 ## 6. Data layout for the coach
 
@@ -179,7 +181,10 @@ The app reads the **first number** in `target_reps` / `target_weight` as the pre
 
 ```bash
 npm install            # Playwright (uses the preinstalled Chromium if PLAYWRIGHT_BROWSERS_PATH is set)
-npm test               # end-to-end offline test
+npm test               # unit tests + end-to-end offline test
+PW_CHANNEL=chrome npm test   # use the installed Google Chrome instead of downloading Playwright's Chromium
+npm run test:unit    # Worker unit tests (node --test)
+npx wrangler dev       # Worker + app locally; needs .dev.vars with APP_TOKEN and VAPID_PRIVATE_KEY
 npm run serve          # http://localhost:8080 (service workers work on localhost)
 npm run icons          # regenerate icons from the SVG in tools/make-icons.mjs
 ```
