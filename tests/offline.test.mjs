@@ -142,6 +142,16 @@ async function logSet(page, ex, set) {
   await page.click(`[data-act="log"][data-ex="${ex}"][data-set="${set}"]`);
   await assertEventually(async () => (await done.count()) === before + 1, `set ${ex}/${set} saved`);
 }
+// Drag an element horizontally with the mouse (pointer events), by fractions of its width.
+async function swipe(page, selector, fromFrac, toFrac) {
+  const box = await page.locator(selector).boundingBox();
+  const y = box.y + box.height / 2;
+  await page.mouse.move(box.x + box.width * fromFrac, y);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * toFrac, y, { steps: 8 });
+  await page.mouse.up();
+}
+const swipeLeft = (page, selector) => swipe(page, selector, 0.8, 0.15);
 async function assertEventually(fn, what, timeout = 15000) {
   const end = Date.now() + timeout;
   for (;;) {
@@ -359,7 +369,17 @@ async function main() {
   await page.waitForSelector('section[data-ex="0"]');
   assert.match(await page.locator('section[data-ex="0"] .ex-last').innerText(), /110×8, 110×8, 110×8/);
   assert.equal(await page.inputValue('input[data-field="w"][data-ex="0"][data-set="1"]'), '110', 'prefilled from last time (more than target)');
-  await page.click('[data-act="discard"]');
+  await page.click('#btn-back');
+  await page.waitForSelector('.swipe .day-btn.resume');
+  await swipeLeft(page, '.swipe .day-btn.resume');
+  assert.equal((await page.locator('.swipe-action').innerText()).trim(), 'Discard');
+  assert.ok(await page.locator('.swipe-action').isVisible(), 'action visible after swipe');
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.screenshot({ path: join(ROOT, 'test-results', 'swipe.png') }).catch(() => {});
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.click('.swipe-action');
+  await assertEventually(async () => (await page.locator('.day-btn.resume').count()) === 0, 'resume card gone after swipe-Discard');
+  assert.equal(await page.evaluate(() => window.__wl.state.active), null);
   await page.waitForSelector('[data-act="start"][data-day="A"]');
   await page.click('[data-nav="history"]');
   await page.waitForSelector('svg.chart');
@@ -385,6 +405,25 @@ async function main() {
   await logSet(page, 0, 1); // Romanian deadlift: 120 s rest
   await assertEventually(async () => restCalls.length === 2, 'PUT after ✓');
   const put = lastRest();
+  // Swipe detour: with a set logged the card offers Finish; swiping back closes it; tap resumes.
+  await page.click('#btn-back');
+  await page.waitForSelector('.swipe .day-btn.resume');
+  await swipeLeft(page, '.swipe .day-btn.resume');
+  assert.equal((await page.locator('.swipe-action').innerText()).trim(), 'Finish');
+  await swipe(page, '.swipe .day-btn.resume', 0.15, 0.8);
+  await assertEventually(async () => !(await page.locator('.swipe').evaluate((el) => el.classList.contains('open'))), 'swipe closed');
+  await assertEventually(async () => /^(none|matrix\(1, 0, 0, 1, 0, 0\))$/.test(await page.locator('.swipe .day-btn.resume').evaluate((el) => getComputedStyle(el).transform)), 'card back at translateX 0');
+  assert.ok(!(await page.locator('.swipe-action').click({ timeout: 1000, trial: true }).then(() => true, () => false)), 'closed action is not clickable');
+  await swipeLeft(page, '.swipe .day-btn.resume');
+  await page.click('.swipe-action');
+  await page.waitForSelector('#fin-save');
+  await page.click('#fin-cancel');
+  await page.waitForSelector('#fin-save', { state: 'hidden' });
+  await page.waitForSelector('section[data-ex="0"]');
+  // Tap on the closed card resumes.
+  await page.click('#btn-back');
+  await page.click('.swipe .day-btn.resume');
+  await page.waitForSelector('section[data-ex="0"]');
   assert.equal(put.method, 'PUT');
   assert.ok(Math.abs(put.body.endsAt - (put.at + 120000)) < 2000, 'alert at the end of the 120 s rest');
   await page.click('#rest-plus');

@@ -304,3 +304,12 @@ label.lbl { display: block; font-size: 14px; color: var(--muted); margin: 12px 0
 .summary-stat:last-child { border: 0; }
 .kv { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; font-size: 15px; }
 .kv span:last-child { color: var(--muted); text-align: right; word-break: break-all; }
+
+/* Swipe-left on the Resume card reveals Discard/Finish. */
+.swipe { position: relative; overflow: hidden; border-radius: 18px; margin-bottom: 14px; }
+.swipe .day-btn { margin-bottom: 0; position: relative; touch-action: pan-y; transition: transform .2s ease; }
+.swipe.open .day-btn { transform: translateX(-88px); }
+.swipe-action {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 88px;
+  border: 0; background: var(--bad); color: #fff; font: inherit; font-weight: 700; font-size: 17px;
+}

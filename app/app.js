@@ -720,10 +720,13 @@
     let html = '';
     if (a) {
       const n = sessionSets().length;
-      html += `<button class="day-btn resume" data-act="resume">
-        <div><span class="big">Resume</span><span class="focus">Day ${esc(a.day)}</span></div>
-        <div class="last">Started ${new Date(a.started_ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · ${n} set${n === 1 ? '' : 's'} logged</div>
-      </button>`;
+      html += `<div class="swipe">
+        <button class="swipe-action" data-act="swipe-${n ? 'finish' : 'discard'}">${n ? 'Finish' : 'Discard'}</button>
+        <button class="day-btn resume" data-act="resume">
+          <div><span class="big">Resume</span><span class="focus">Day ${esc(a.day)}</span></div>
+          <div class="last">Started ${new Date(a.started_ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · ${n} set${n === 1 ? '' : 's'} logged</div>
+        </button>
+      </div>`;
     }
     for (const day of Object.keys(DAYS)) {
       const ld = lastDone(day);
@@ -1098,6 +1101,7 @@
     $('#rest-skip').addEventListener('click', () => { if (state.active) { state.active.rest = null; saveActive(); } hideRest(); restAlert(null); });
 
     main().addEventListener('click', onMainClick);
+    bindSwipe();
     main().addEventListener('input', onMainInput);
     main().addEventListener('change', (e) => {
       if (e.target.id === 'chart-ex') { state.chartExercise = e.target.value; render(); }
@@ -1120,6 +1124,44 @@
     document.addEventListener('gesturestart', (e) => e.preventDefault());
   }
 
+  // Swipe the Resume card left to reveal Discard/Finish (Pointer Events, so mouse and touch both work).
+  function bindSwipe() {
+    const OPEN = 88;
+    let drag = null;      // { id, x, y, base, el, card, swiping }
+    let dragged = false;  // a drag just ended, so swallow the click that follows
+    const setX = (card, x) => { card.style.transition = 'none'; card.style.transform = `translateX(${x}px)`; };
+    document.addEventListener('pointerdown', (e) => {
+      dragged = false;
+      const el = e.target.closest('.swipe');
+      document.querySelectorAll('.swipe.open').forEach((o) => { if (o !== el) o.classList.remove('open'); });
+      if (!el || e.target.closest('.swipe-action')) return;
+      drag = { id: e.pointerId, x: e.clientX, y: e.clientY, base: el.classList.contains('open') ? -OPEN : 0, el, card: el.querySelector('.day-btn'), swiping: false };
+    });
+    main().addEventListener('pointermove', (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      if (!drag.swiping) {
+        if (Math.abs(dx) <= 10 || Math.abs(dx) <= Math.abs(dy)) return;
+        drag.swiping = true;
+        drag.card.setPointerCapture(e.pointerId);
+      }
+      setX(drag.card, Math.max(-OPEN, Math.min(0, drag.base + dx)));
+    });
+    const end = (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const { el, card, swiping, base, x: x0 } = drag;
+      drag = null;
+      if (!swiping) return;
+      dragged = true;
+      const x = Math.max(-OPEN, Math.min(0, base + e.clientX - x0));
+      card.style.transition = card.style.transform = '';
+      el.classList.toggle('open', e.type === 'pointerup' && x < -OPEN / 2);
+    };
+    main().addEventListener('pointerup', end);
+    main().addEventListener('pointercancel', end);
+    main().addEventListener('click', (e) => { if (dragged) { dragged = false; e.stopPropagation(); e.preventDefault(); } }, true);
+  }
+
   async function onMainClick(e) {
     const b = e.target.closest('[data-act]');
     if (!b) return;
@@ -1129,6 +1171,8 @@
     switch (act) {
       case 'save-config': return saveConfig();
       case 'resume': return go('workout');
+      case 'swipe-discard': return discardSession();
+      case 'swipe-finish': go('workout'); return openFinish();
       case 'start': {
         const day = b.dataset.day;
         if (state.active) {
