@@ -235,7 +235,6 @@ async function main() {
     }));
     for (const f of fit) assert.ok(f.room >= f.text, `at ${width}px a weight like 102.5 fits its box (${Math.round(f.room)} ≥ ${Math.round(f.text)})`);
   }
-  await page.setViewportSize({ width: 390, height: 844 });
 
   // Squat set 1: bump weight +5 → 110 and verify set 2 carries it.
   await page.click('[data-act="step"][data-ex="0"][data-set="1"][data-field="w"][data-delta="5"]');
@@ -374,9 +373,7 @@ async function main() {
   await swipeLeft(page, '.swipe .day-btn.resume');
   assert.equal((await page.locator('.swipe-action').innerText()).trim(), 'Discard');
   assert.ok(await page.locator('.swipe-action').isVisible(), 'action visible after swipe');
-  await page.setViewportSize({ width: 375, height: 812 });
   await page.screenshot({ path: join(ROOT, 'test-results', 'swipe.png') }).catch(() => {});
-  await page.setViewportSize({ width: 390, height: 844 });
   await page.click('.swipe-action');
   await assertEventually(async () => (await page.locator('.day-btn.resume').count()) === 0, 'resume card gone after swipe-Discard');
   assert.equal(await page.evaluate(() => window.__wl.state.active), null);
@@ -414,6 +411,12 @@ async function main() {
   await assertEventually(async () => !(await page.locator('.swipe').evaluate((el) => el.classList.contains('open'))), 'swipe closed');
   await assertEventually(async () => /^(none|matrix\(1, 0, 0, 1, 0, 0\))$/.test(await page.locator('.swipe .day-btn.resume').evaluate((el) => getComputedStyle(el).transform)), 'card back at translateX 0');
   assert.ok(!(await page.locator('.swipe-action').click({ timeout: 1000, trial: true }).then(() => true, () => false)), 'closed action is not clickable');
+  // Tapping the open card closes it (does not resume).
+  await swipeLeft(page, '.swipe .day-btn.resume');
+  await page.click('.swipe .day-btn.resume');
+  await assertEventually(async () => /^(none|matrix\(1, 0, 0, 1, 0, 0\))$/.test(await page.locator('.swipe .day-btn.resume').evaluate((el) => getComputedStyle(el).transform)), 'tap on open card closes it');
+  assert.equal(await page.evaluate(() => window.__wl.state.view), 'home');
+  assert.ok(!(await page.locator('.swipe-action').click({ timeout: 1000, trial: true }).then(() => true, () => false)), 'action not clickable after tap-close');
   await swipeLeft(page, '.swipe .day-btn.resume');
   await page.click('.swipe-action');
   await page.waitForSelector('#fin-save');

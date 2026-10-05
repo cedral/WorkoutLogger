@@ -1131,6 +1131,7 @@
     let dragged = false;  // a drag just ended, so swallow the click that follows
     const setX = (card, x) => { card.style.transition = 'none'; card.style.transform = `translateX(${x}px)`; };
     document.addEventListener('pointerdown', (e) => {
+      drag = null;
       dragged = false;
       const el = e.target.closest('.swipe');
       document.querySelectorAll('.swipe.open').forEach((o) => { if (o !== el) o.classList.remove('open'); });
@@ -1170,7 +1171,11 @@
     const n = Number(b.dataset.set);
     switch (act) {
       case 'save-config': return saveConfig();
-      case 'resume': return go('workout');
+      case 'resume': {
+        const sw = b.closest('.swipe');
+        if (sw && sw.classList.contains('open')) return sw.classList.remove('open');
+        return go('workout');
+      }
       case 'swipe-discard': return discardSession();
       case 'swipe-finish': go('workout'); return openFinish();
       case 'start': {
