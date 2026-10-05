@@ -187,7 +187,13 @@ h3 { font-size: 18px; margin: 0; }
   border: 0; background: transparent; font-size: 22px; font-weight: 700;
 }
 .stepper .unit { position: relative; }
-.field { flex: 1; min-width: 0; }
+.field { flex: 1; min-width: 0; container-type: inline-size; }
+/* Too narrow for − 102.5 + in one row (e.g. iPhone mini): number on top, − and + underneath. */
+@container (max-width: 150px) {
+  .stepper { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+  .stepper input { grid-column: 1 / -1; grid-row: 1; height: 44px; }
+  .stepper button { width: auto; height: 44px; }
+}
 .field-label { font-size: 11px; color: var(--muted); text-align: center; text-transform: uppercase; letter-spacing: .04em; }
 .check {
   flex: none; width: 56px; height: 56px; border-radius: 14px;

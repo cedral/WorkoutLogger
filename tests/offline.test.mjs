@@ -214,6 +214,18 @@ async function main() {
   const exNames = await page.locator('section.ex h3').allInnerTexts();
   assert.deepEqual(exNames, ['Barbell back squat', 'Bench press', 'Seated cable row', 'DB walking lunges', 'DB lateral raises', 'Plank']);
   assert.equal(await page.inputValue('input[data-field="w"][data-ex="0"][data-set="1"]'), '105', 'prefilled from target');
+  // On narrow phones (iPhone mini = 375 pt) the number must still fit inside its box.
+  for (const width of [375, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    const fit = await page.evaluate(() => [...document.querySelectorAll('section[data-ex="0"] .set .stepper input')].slice(0, 2).map((i) => {
+      const cs = getComputedStyle(i);
+      const ctx = document.createElement('canvas').getContext('2d');
+      ctx.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+      return { room: i.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight), text: ctx.measureText('102.5').width };
+    }));
+    for (const f of fit) assert.ok(f.room >= f.text, `at ${width}px a weight like 102.5 fits its box (${Math.round(f.room)} ≥ ${Math.round(f.text)})`);
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
 
   // Squat set 1: bump weight +5 → 110 and verify set 2 carries it.
   await page.click('[data-act="step"][data-ex="0"][data-set="1"][data-field="w"][data-delta="5"]');
