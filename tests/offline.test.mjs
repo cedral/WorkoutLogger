@@ -40,6 +40,7 @@ function stopServer(srv) {
 
 let swBuild = null; // when set, serve sw.js as if a new version was deployed
 const appHandler = async (req, res) => {
+  if (new URL(req.url, APP_URL).pathname.startsWith('/api/')) return fakeWorker(req, res);
   let p = decodeURIComponent(new URL(req.url, APP_URL).pathname);
   if (p.endsWith('/')) p += 'index.html';
   const file = normalize(join(APP_DIR, p));
@@ -57,6 +58,20 @@ const appHandler = async (req, res) => {
 const backend = createBackend();
 const TOKEN = backend.ctx.setup();
 const traffic = { posts: 0, options: 0, contentTypes: [], failNextPostAfterCommit: 0 };
+
+// Fake Worker API (/api/*), served by the app server like Cloudflare does.
+const FAKE_VAPID_KEY = Buffer.from([4, ...new Array(64).fill(1)]).toString('base64url');
+const restCalls = [];
+function fakeWorker(req, res) {
+  const path = new URL(req.url, APP_URL).pathname;
+  if (path === '/api/vapid-public-key') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end(FAKE_VAPID_KEY); }
+  let body = '';
+  req.on('data', (c) => { body += c; });
+  req.on('end', () => {
+    restCalls.push({ method: req.method, path, auth: req.headers.authorization, body: body ? JSON.parse(body) : null, at: Date.now() });
+    res.writeHead(204); res.end();
+  });
+}
 
 const apiHandler = (req, res) => {
   const cors = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
@@ -94,6 +109,14 @@ async function launch() {
   });
   ctx.on('weberror', (e) => console.error('PAGE ERROR', e.error()));
   await ctx.grantPermissions(['notifications'], { origin: `http://127.0.0.1:${APP_PORT}` });
+  // Headless Chromium has no push service, so pretend the browser subscribed.
+  await ctx.addInitScript(() => {
+    if (!self.PushManager) return;
+    const json = { endpoint: 'https://push.example/sub1', expirationTime: null, keys: { p256dh: 'p', auth: 'a' } };
+    const sub = { endpoint: json.endpoint, toJSON: () => json };
+    PushManager.prototype.subscribe = async () => sub;
+    PushManager.prototype.getSubscription = async () => sub;
+  });
   return ctx;
 }
 async function openApp(ctx) {
@@ -170,6 +193,13 @@ async function main() {
   await page.evaluate(async () => (await (await navigator.serviceWorker.ready).getNotifications()).forEach((n) => n.close()));
   await cdp.detach();
   log('push → "Rest over" notification');
+  await page.click('[data-nav="settings"]');
+  await page.click('[data-act="enable-alerts"]');
+  await page.waitForSelector('[data-act="test-alert"]');
+  assert.equal(await page.evaluate(() => window.__wl.state.push.endpoint), 'https://push.example/sub1');
+  await page.click('[data-nav="home"]');
+  await page.waitForSelector('[data-act="start"][data-day="A"]');
+  log('rest alerts enabled');
 
   // --- 2. Go offline for real: emulate offline AND kill both servers ---
   await ctx.setOffline(true);
@@ -325,7 +355,41 @@ async function main() {
   await page.screenshot({ path: join(ROOT, 'test-results', 'history.png') }).catch(() => {});
   log('last-time prefill, last-done date and history chart OK');
 
-  // --- 8. Deploying a new version shows the update toast; tapping it reloads onto the new SW ---
+  // --- 8. Rest alerts: the Worker hears when each rest ends, and when it's cancelled ---
+  restCalls.length = 0;
+  const lastRest = () => restCalls[restCalls.length - 1];
+  await page.click('[data-nav="settings"]');
+  await page.click('[data-act="test-alert"]');
+  await assertEventually(async () => restCalls.length === 1, 'test alert PUT');
+  assert.equal(lastRest().method, 'PUT');
+  assert.equal(lastRest().path, '/api/rest');
+  assert.equal(lastRest().auth, `Bearer ${TOKEN}`);
+  assert.equal(lastRest().body.subscription.endpoint, 'https://push.example/sub1');
+  assert.ok(Math.abs(lastRest().body.endsAt - (lastRest().at + 5000)) < 2000, 'test alert in ~5 s');
+
+  await page.click('[data-nav="home"]');
+  await page.click('[data-act="start"][data-day="B"]');
+  await page.waitForSelector('section[data-ex="0"]');
+  await logSet(page, 0, 1); // Romanian deadlift: 120 s rest
+  await assertEventually(async () => restCalls.length === 2, 'PUT after ✓');
+  const put = lastRest();
+  assert.equal(put.method, 'PUT');
+  assert.ok(Math.abs(put.body.endsAt - (put.at + 120000)) < 2000, 'alert at the end of the 120 s rest');
+  await page.click('#rest-plus');
+  await assertEventually(async () => restCalls.length === 3, 'PUT after +30s');
+  assert.equal(lastRest().body.endsAt, put.body.endsAt + 30000);
+  await page.click('#rest-skip');
+  await assertEventually(async () => restCalls.length === 4 && lastRest().method === 'DELETE', 'DELETE after skip');
+  await logSet(page, 0, 2);
+  await assertEventually(async () => restCalls.length === 5 && lastRest().method === 'PUT', 'PUT after next ✓');
+  await page.click('[data-act="finish"]');
+  await page.click('[data-energy="3"]');
+  await page.click('#fin-save');
+  await page.waitForSelector('text=Day B done');
+  await assertEventually(async () => lastRest().method === 'DELETE', 'DELETE after finish');
+  log('rest alerts: PUT on ✓, +30s and test; DELETE on skip and finish');
+
+  // --- 9. Deploying a new version shows the update toast; tapping it reloads onto the new SW ---
   swBuild = 'v2test';
   await page.click('[data-nav="settings"]');
   await page.click('[data-act="check-update"]');

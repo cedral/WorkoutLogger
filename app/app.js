@@ -153,15 +153,16 @@
     persisted: null,
     chartExercise: null,
     reg: null,
+    push: null,           // PushSubscription JSON when rest alerts are on
   };
   const sync = { running: false, again: false, failures: 0, nextAt: 0, timer: null, lastError: null, lastSyncAt: null };
 
   async function loadLocal() {
-    const [config, plan, history, active, syncInfo, sets, sessions, pending] = await Promise.all([
+    const [config, plan, history, active, syncInfo, sets, sessions, pending, push] = await Promise.all([
       idbGet('kv', 'config'), idbGet('kv', 'plan'), idbGet('kv', 'history'), idbGet('kv', 'active'),
-      idbGet('kv', 'sync'), idbAll('sets'), idbAll('sessions'), idbCount('outbox'),
+      idbGet('kv', 'sync'), idbAll('sets'), idbAll('sessions'), idbCount('outbox'), idbGet('kv', 'push'),
     ]);
-    Object.assign(state, { config, plan, history, active, localSets: sets, localSessions: sessions, pending });
+    Object.assign(state, { config, plan, history, active, localSets: sets, localSessions: sessions, pending, push });
     if (syncInfo) sync.lastSyncAt = syncInfo.lastSyncAt;
   }
 
@@ -465,6 +466,7 @@
       ]);
       state.localSets.push(rec);
       if (!(Number(pe.rest_sec) > 0)) a.rest = null;
+      restAlert(a.rest && a.rest.endsAt);
       render();
       tickRest();
       await updatePending();
@@ -496,6 +498,7 @@
     state.active = null;
     state.summary = { session, sets, plan: a.plan };
     hideRest();
+    restAlert(null);
     await updatePending();
     go('summary');
     if (navigator.onLine) flush();
@@ -512,8 +515,63 @@
     state.localSessions = state.localSessions.filter((s) => s.session_id !== a.session_id);
     state.active = null;
     hideRest();
+    restAlert(null);
     await updatePending();
     go('home');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Rest alerts — the Worker pushes a notification when a rest ends (watch buzz).
+  // ---------------------------------------------------------------------------
+  const pushSupported = () => 'PushManager' in window && 'serviceWorker' in navigator && 'Notification' in window;
+  const fromB64u = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+
+  /** Tell the Worker when this rest ends (null = cancel). Best effort: offline, the in-app beep still fires. */
+  function restAlert(endsAt) {
+    if (!state.push || !state.config) return;
+    fetch('api/rest', {
+      method: endsAt ? 'PUT' : 'DELETE',
+      headers: { Authorization: `Bearer ${state.config.token}`, 'Content-Type': 'application/json' },
+      body: endsAt ? JSON.stringify({ endsAt, subscription: state.push }) : undefined,
+    }).catch(() => {});
+  }
+
+  async function enableAlerts() {
+    try {
+      if (await Notification.requestPermission() !== 'granted') { toast('Notifications not allowed', 2500); return render(); }
+      const reg = await navigator.serviceWorker.ready;
+      const res = await fetch('api/vapid-public-key', { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: fromB64u(await res.text()) });
+      state.push = sub.toJSON();
+      await kvSet('push', state.push);
+      toast('Rest alerts on', 2000);
+    } catch (e) {
+      toast(`Couldn't turn on alerts: ${e.message}`, 3500);
+    }
+    render();
+  }
+
+  /** iOS can drop or rotate a subscription; keep our copy in step with the browser's. */
+  async function refreshPush() {
+    if (!state.push || !pushSupported()) return;
+    try {
+      const sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription();
+      const json = sub && sub.toJSON();
+      if (!json || Notification.permission !== 'granted') { state.push = null; await kvDel('push'); }
+      else if (json.endpoint !== state.push.endpoint) { state.push = json; await kvSet('push', json); }
+    } catch { /* keep what we have */ }
+  }
+
+  function alertsCard() {
+    let body;
+    if (!pushSupported()) body = '<p class="small muted">Open the app from its Home Screen icon to turn on rest alerts.</p>';
+    else if (Notification.permission === 'denied') body = '<p class="small muted">Notifications are blocked. Allow them for Workout in iOS Settings → Notifications.</p>';
+    else if (state.push) body = `<p class="small muted">On. When a rest ends you get a notification; with the phone locked, your watch buzzes.</p>
+        <button class="btn" data-act="test-alert">Send a test alert in 5 s</button>`;
+    else body = `<p class="small muted">Get a notification when rest ends, so your watch buzzes.</p>
+        <button class="btn primary" data-act="enable-alerts">Enable rest alerts</button>`;
+    return `<div class="card stack"><h3>Rest alerts</h3>${body}</div>`;
   }
 
   // ---------------------------------------------------------------------------
@@ -945,6 +1003,7 @@
         <button class="btn primary" data-act="force-sync">Force sync</button>
         <button class="btn" data-act="refresh">Re-download plan &amp; history</button>
       </div>
+      ${alertsCard()}
       <div class="card stack">
         <h3>Backup</h3>
         <p class="small muted">Everything on this phone: sets, sessions, unsynced queue, plan.</p>
@@ -1030,9 +1089,9 @@
       const r = state.active.rest;
       r.endsAt = Math.max(r.endsAt, Date.now()) + 30000;
       r.alerted = false;
-      saveActive(); tickRest();
+      saveActive(); tickRest(); restAlert(r.endsAt);
     });
-    $('#rest-skip').addEventListener('click', () => { if (state.active) { state.active.rest = null; saveActive(); } hideRest(); });
+    $('#rest-skip').addEventListener('click', () => { if (state.active) { state.active.rest = null; saveActive(); } hideRest(); restAlert(null); });
 
     main().addEventListener('click', onMainClick);
     main().addEventListener('input', onMainInput);
@@ -1103,6 +1162,8 @@
       case 'refresh':
         try { await Promise.all([refreshPlan(), refreshHistory()]); toast('Plan & history updated', 2000); render(); } catch (err) { toast(`Failed: ${err.message}`, 3000); }
         return;
+      case 'enable-alerts': return enableAlerts();
+      case 'test-alert': restAlert(Date.now() + 5000); toast('Test alert in 5 s. Lock your phone now.', 3000); return;
       case 'export': return exportData();
       case 'check-update':
         if (!state.reg) return toast('Service worker not active', 2000);
@@ -1158,6 +1219,7 @@
     await loadLocal();
     bindEvents();
     registerSW();
+    refreshPush();
     if (navigator.storage && navigator.storage.persist) {
       navigator.storage.persist().then((p) => { state.persisted = p; }).catch(() => {});
     }
