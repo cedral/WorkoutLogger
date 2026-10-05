@@ -202,3 +202,7 @@ npm run icons          # regenerate icons from the SVG in tools/make-icons.mjs
    - No CORS preflight was sent, and every POST was `text/plain`.
    - Replaying all 18 sets inserts 0.
 7. Checks the "last time" prefill, the history chart and the update-available toast flow.
+
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE.md). You may use, change and share this code for personal or other noncommercial purposes. Commercial use needs the author's permission.

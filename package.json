@@ -1,6 +1,7 @@
 {
   "name": "workout-logger",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "scripts": {
     "serve": "npx http-server app -p 8080 -c-1",
