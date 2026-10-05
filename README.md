@@ -77,7 +77,7 @@ One Worker serves `app/` and the rest-alert API. It's on the free plan.
 
 After that, every push runs the tests, and pushes to the default branch run `wrangler deploy` (`.github/workflows/deploy.yml`).
 
-Don't regenerate `VAPID_PRIVATE_KEY` casually. If you do, turn rest alerts off and on again on the phone (Settings).
+Don't regenerate `VAPID_PRIVATE_KEY` casually. If you do, tap **Re-register** on the phone (Settings → Rest alerts).
 
 ## 3. Install on the iPhone
 
@@ -185,6 +185,7 @@ npm test               # unit tests + end-to-end offline test
 PW_CHANNEL=chrome npm test   # use the installed Google Chrome instead of downloading Playwright's Chromium
 npm run test:unit    # Worker unit tests (node --test)
 npx wrangler dev       # Worker + app locally; needs .dev.vars with APP_TOKEN and VAPID_PRIVATE_KEY
+                       # (runs on http://localhost, so real pushes to an iPhone only work from the deployed https Worker)
 npm run serve          # http://localhost:8080 (service workers work on localhost)
 npm run icons          # regenerate icons from the SVG in tools/make-icons.mjs
 ```

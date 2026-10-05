@@ -542,6 +542,9 @@
       const reg = await navigator.serviceWorker.ready;
       const res = await fetch('api/vapid-public-key', { cache: 'no-store' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // A leftover subscription made with a different key makes subscribe() throw InvalidStateError.
+      const old = await reg.pushManager.getSubscription();
+      if (old) await old.unsubscribe();
       const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: fromB64u(await res.text()) });
       state.push = sub.toJSON();
       await kvSet('push', state.push);
@@ -568,7 +571,8 @@
     if (!pushSupported()) body = '<p class="small muted">Open the app from its Home Screen icon to turn on rest alerts.</p>';
     else if (Notification.permission === 'denied') body = '<p class="small muted">Notifications are blocked. Allow them for Workout in iOS Settings → Notifications.</p>';
     else if (state.push) body = `<p class="small muted">On. When a rest ends you get a notification; with the phone locked, your watch buzzes.</p>
-        <button class="btn" data-act="test-alert">Send a test alert in 5 s</button>`;
+        <button class="btn" data-act="test-alert">Send a test alert in 5 s</button>
+        <button class="btn small" data-act="enable-alerts">Re-register</button>`;
     else body = `<p class="small muted">Get a notification when rest ends, so your watch buzzes.</p>
         <button class="btn primary" data-act="enable-alerts">Enable rest alerts</button>`;
     return `<div class="card stack"><h3>Rest alerts</h3>${body}</div>`;

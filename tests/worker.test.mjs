@@ -57,6 +57,13 @@ test('serves the VAPID public key without auth', async () => {
   assert.equal(await res.text(), publicKeyFromJwk(JSON.parse(env.VAPID_PRIVATE_KEY)));
 });
 
+test('vapid-public-key is 503 when the key is not configured', async () => {
+  delete env.VAPID_PRIVATE_KEY;
+  const res = await call('GET', { path: '/api/vapid-public-key', token: null });
+  assert.equal(res.status, 503);
+  assert.equal(await res.text(), 'VAPID key not configured');
+});
+
 test('unknown paths are 404', async () => {
   assert.equal((await call('GET', { path: '/api/nope' })).status, 404);
 });
@@ -94,7 +101,8 @@ test('alarm() sends a VAPID-signed empty push', async () => {
   const { url, init } = pushes[0];
   assert.equal(url, SUB.endpoint);
   assert.equal(init.method, 'POST');
-  assert.equal(init.body, undefined);
+  assert.equal(init.body.byteLength, 0, 'explicit empty body so Content-Length: 0 is sent');
+  assert.equal(init.headers.Topic, 'rest');
   assert.equal(init.headers.TTL, '60');
   assert.equal(init.headers.Urgency, 'high');
   assert.match(init.headers.Authorization, new RegExp(`^vapid t=[\\w-]+\\.[\\w-]+\\.[\\w-]+, k=${publicKeyFromJwk(JSON.parse(env.VAPID_PRIVATE_KEY))}$`));
@@ -112,7 +120,15 @@ test('alarm() forgets a subscription the push service says is gone', async () =>
 test('alarm() swallows network errors (no retry storm)', async () => {
   await call('PUT', { body: { endsAt: Date.now() + 1000, subscription: SUB } });
   pushStatus = 'throw';
-  await assert.doesNotReject(timer.alarm());
+  const realError = console.error;
+  const logged = [];
+  console.error = (...a) => logged.push(a);
+  try {
+    await assert.doesNotReject(timer.alarm());
+  } finally {
+    console.error = realError;
+  }
+  assert.equal(logged.length, 1);
   assert.ok(storage.data.get('target'), 'subscription kept');
 });
 

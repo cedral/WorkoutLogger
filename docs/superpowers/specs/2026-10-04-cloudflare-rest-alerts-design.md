@@ -31,15 +31,14 @@ There is one Worker, `workout-logger`, configured in `wrangler.jsonc` at the rep
 - **`/api/rest`:** authenticated with `Authorization: Bearer <APP_TOKEN>`. Any other token gets a 401.
   - `PUT /api/rest` with body `{ endsAt: <epoch ms>, subscription: <PushSubscription JSON> }` stores the subscription and sets the alarm to `endsAt`. Calling it again replaces both, which is what the +30 s button uses.
   - `DELETE /api/rest` deletes the alarm. It's idempotent.
-- **`RestTimer` Durable Object** (SQLite-backed, so it's on the free plan): a single instance (`idFromName('me')`). It stores the latest subscription and holds one alarm. `alarm()` sends a Web Push with **no payload**, signed with VAPID (an ES256 JWT built with WebCrypto, `aud` = the push endpoint's origin, `sub` = `mailto:` the owner, 12 h expiry), with `TTL: 60` and `Urgency: high`.
+- **`RestTimer` Durable Object** (SQLite-backed, so it's on the free plan): a single instance (`idFromName('me')`). It stores the latest subscription and holds one alarm. `alarm()` sends a Web Push with **no payload**, signed with VAPID (an ES256 JWT built with WebCrypto, `aud` = the push endpoint's origin, `sub` = the Worker's own `https://` origin, 12 h expiry), with `TTL: 60` and `Urgency: high`.
   - If the push service returns 404 or 410, the subscription is deleted.
   - Other failures are logged and not retried.
 - **Secrets and variables:**
   - `APP_TOKEN` (secret): the same token as Apps Script.
   - `VAPID_PRIVATE_KEY` (secret): a JWK.
-  - `VAPID_PUBLIC_KEY` (var): base64url, raw uncompressed P-256 point.
   - The page gets the public key from `GET /api/vapid-public-key`, which needs no auth.
-- `tools/make-vapid.mjs` generates the key pair and prints both values.
+- `tools/make-vapid.mjs` generates the key pair and prints the private JWK (the public key is derived from it).
 
 ## App changes (`app/`)
 
@@ -66,7 +65,6 @@ There is one Worker, `workout-logger`, configured in `wrangler.jsonc` at the rep
 - **One-time setup** (in the README):
   1. Create the API token.
   2. `wrangler secret put APP_TOKEN` and `wrangler secret put VAPID_PRIVATE_KEY`.
-  3. Set `VAPID_PUBLIC_KEY` in `wrangler.jsonc`.
 - **Cutover:**
   1. First deploy.
   2. Confirm the old app shows ✓ synced.

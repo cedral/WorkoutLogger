@@ -36,6 +36,7 @@ export async function vapidAuthorization(endpoint, privateJwk, subject, now = Da
 export async function sendPush(subscription, privateJwk, subject) {
   return fetch(subscription.endpoint, {
     method: 'POST',
+    body: new Uint8Array(0), // explicit empty body so Content-Length: 0 is sent (some push services 411 without it)
     headers: {
       Authorization: await vapidAuthorization(subscription.endpoint, privateJwk, subject),
       TTL: '60',        // drop it if the phone can't be reached within a minute

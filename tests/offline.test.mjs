@@ -113,7 +113,7 @@ async function launch() {
   await ctx.addInitScript(() => {
     if (!self.PushManager) return;
     const json = { endpoint: 'https://push.example/sub1', expirationTime: null, keys: { p256dh: 'p', auth: 'a' } };
-    const sub = { endpoint: json.endpoint, toJSON: () => json };
+    const sub = { endpoint: json.endpoint, toJSON: () => json, unsubscribe: async () => true };
     PushManager.prototype.subscribe = async () => sub;
     PushManager.prototype.getSubscription = async () => sub;
   });

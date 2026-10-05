@@ -11,6 +11,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === '/api/vapid-public-key' && request.method === 'GET') {
+      if (!env.VAPID_PRIVATE_KEY) return new Response('VAPID key not configured', { status: 503 });
       return new Response(publicKeyFromJwk(JSON.parse(env.VAPID_PRIVATE_KEY)), {
         headers: { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' },
       });
