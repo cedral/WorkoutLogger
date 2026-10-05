@@ -23,6 +23,9 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm test
+        env:
+          # Full Chromium, not the headless shell, which can't show notifications.
+          PW_CHANNEL: chromium
 
   deploy:
     needs: test
